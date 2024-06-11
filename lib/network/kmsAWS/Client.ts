@@ -1,14 +1,16 @@
 'use strict'; // eslint-disable-line
 /* eslint new-cap: "off" */
 
+import async from 'async';
 import errors from '../../errors';
+import { BucketInfo } from '../../models';
 import * as werelogs from 'werelogs';
-import { KMSClient, CreateKeyCommand, ScheduleKeyDeletionCommand, EncryptCommand, DecryptCommand, GenerateDataKeyCommand, DataKeySpec } from "@aws-sdk/client-kms";
+import { KMSClient, CreateAliasCommand, CreateKeyCommand, DescribeKeyCommand, ScheduleKeyDeletionCommand, EncryptCommand, DecryptCommand, GenerateDataKeyCommand, DataKeySpec } from "@aws-sdk/client-kms";
 import { AwsCredentialIdentity } from "@smithy/types";
 import assert from 'assert';
 import { bool } from 'aws-sdk/clients/signer';
 
-const USER_ALIAS_PREFIX = "alias/s3user-";
+const ACCOUNT_ALIAS_PREFIX = "alias/s3user-";
 
 /**
  * Normalize errors according to arsenal definitions
@@ -61,6 +63,7 @@ export default class Client {
                 endpoint?: string,
                 ak?: string,
                 sk?: string,
+                perUserKey?: bool,
             }
         },
         logger: werelogs.Logger
@@ -78,26 +81,135 @@ export default class Client {
             endpoint: options.kmsAWS.endpoint,
             ...credentials
         });
+
+        this.options = {
+            perUserKey: options.kmsAWS.perUserKey
+        };
+
+        // Explicit the usage of per user keys.
+        if (this.options.perUserKey) {
+            logger.info("Using per-User Keys instead of per-bucket keys (existing keys are preserved)");
+        }
     }
 
     /**
-     * Create a new cryptographic key managed by the server,
-     * for a specific bucket
-     * @param bucketName - The bucket name
+     * Get an account key ID
+     *
+     * @param userCanonicalId - The user ID
+     * @returns - The Key ID for the user's account
+     */
+    getAccountKeyId(userCanonicalId: string) {
+        return ACCOUNT_ALIAS_PREFIX + userCanonicalId;
+    }
+
+    /**
+     * Create a new cryptographic key managed by the server for the specified user
+     * (using an alias containing the user cannonical ID).
+     *
+     * @param alias - Alias of the user's key to create
      * @param logger - Werelog logger object
      * @param cb - The callback(err: Error, bucketKeyId: String)
      */
-    createBucketKey(bucketName: string, logger: werelogs.Logger, cb: any) {
-        logger.debug("AWS KMS: createBucketKey", {bucketName});
+    _createUserKey (alias: string, logger: werelogs.Logger, cb: any) {
+        async.waterfall([
+            (next) => {
+                // First create a new key for the user ...
+                const cmdCreateKey = new CreateKeyCommand({});
+                this.client.send(cmdCreateKey, (err, create_data) => {
+                    if (err) {
+                        const error = _arsenalError(err);
+                        logger.error("AWS_KMS::createUserKey CreateKey failed", {err, alias});
+                        next (error);
+                    } else {
+                        const keyId = create_data?.KeyMetadata?.KeyId;
+                        if (keyId === undefined) {
+                            const error = _arsenalError(err);
+                            logger.error("AWS_KMS::createUserKey CreateKey didn't returned key id", {err, alias});
+                            next (error);
+                        } else {
+                            next(null, keyId)
+                        }
+                    }
+                });
+            },
+            (keyId, next) => {
+                // ... then put an alias on the created-key so we can access it through the alias (ie: user id).
+                const cmdCreateAlias = new CreateAliasCommand({AliasName: alias, TargetKeyId: keyId});
+                this.client.send(cmdCreateAlias, (err, data) => {
+                    if (err) {
+                        const error = _arsenalError(err);
+                        logger.error("AWS_KMS::createUserKey CreateAlias failed", {err, alias});
+                        next (error);
+                    } else {
+                        logger.trace("AWS_KMS::createUserKey Key successfully created", {data, alias});
+
+                        next (null, alias);
+                    }
+                });
+            }
+        ],
+        (err, alias) => cb(err, alias)
+        );
+    }
+
+    /**
+     * Check and returns the user's account cryptographic key managed by the server.
+     * The key is created only if it doesn't already exist.
+     *
+     * @param userCanonicalId - The user ID
+     * @param logger - Werelog logger object
+     * @param cb - The callback(err: Error, bucketKeyId: String)
+     */
+    getOrCreateAccountKey(userCanonicalId: string, logger: werelogs.Logger, cb: any) {
+        logger.debug("AWS KMS: createUserKey", {userCanonicalId});
+
+        const alias = this.getAccountKeyId(userCanonicalId);
+        const cmdDescribe = new DescribeKeyCommand({KeyId: alias});
+        this.client.send(cmdDescribe, (err, data) => {
+            if (err === null) {
+                // Happy path: the key already exists.
+                logger.trace("AWS KMS: createUserKey, key already exists", {userCanonicalId, KeyMetadata: data?.KeyMetadata});
+                cb(null, alias);
+            } else {
+                if (err.name == "NotFoundException") {
+                    logger.debug("AWS_KMS::createUserKey, key doesn't exists", {err, userCanonicalId});
+
+                    this._createUserKey(alias, logger, cb);
+                } else {
+                    const error = _arsenalError(err);
+                    logger.error("AWS_KMS::createUserKey DescribeKey failed", {err, userCanonicalId});
+                    cb (error);
+                }
+            }
+        });
+    }
+
+    /**
+     * Create a cryptographic key managed by the server,
+     * for a specific bucket.
+     * Depending on the value of this.options.perUserKey:
+     * - false: always create a new key for the bucket,
+     * - true: use the account key (create it if it doesn't exist)
+     *
+     * @param bucket - The bucket info object
+     * @param logger - Werelog logger object
+     * @param cb - The callback(err: Error, bucketKeyId: String)
+     */
+    createBucketKey(bucket: BucketInfo, logger: werelogs.Logger, cb: any) {
+        if (this.options.perUserKey) {
+            return this.getOrCreateAccountKey(bucket.getOwner(), logger, cb);
+        }
+
+        logger.debug("AWS KMS: createBucketKey", {BucketName: bucket.getName()});
 
         const command = new CreateKeyCommand({});
         this.client.send(command, (err, data) => {
             if (err) {
                 const error = _arsenalError(err);
-                logger.error("AWS_KMS::createBucketKey", {err, bucketName});
+                logger.error("AWS_KMS::createBucketKey", {err, BucketName: bucket.getName()});
                 cb (error);
             } else {
-                logger.debug("AWS KMS: createBucketKey", {bucketName, KeyMetadata: data?.KeyMetadata});
+                logger.debug("AWS KMS: createBucketKey", {BucketName: bucket.getName(), KeyMetadata: data?.KeyMetadata});
                 cb(null, data?.KeyMetadata?.KeyId);
             }
           });
@@ -111,6 +223,16 @@ export default class Client {
      */
     destroyBucketKey(bucketKeyId: string, logger: werelogs.Logger, cb: any) {
         logger.debug("AWS KMS: destroyBucketKey", {bucketKeyId: bucketKeyId});
+
+        if (bucketKeyId.startsWith(ACCOUNT_ALIAS_PREFIX)) {
+            // The key is an alias to the user's account global key.
+            // This key is shared between all the buckets of the account and should survive the bucket deletion
+            logger.info("AWS KMS: destroyBucketKey, this is an account key, keep it.", {bucketKeyId: bucketKeyId});
+            process.nextTick(() => {
+                cb();
+            });
+            return;
+        }
 
         // Schedule a deletion in 7 days (the minimum value on this API)
         const command = new ScheduleKeyDeletionCommand({KeyId: bucketKeyId, PendingWindowInDays: 7});

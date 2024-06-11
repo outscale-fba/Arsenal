@@ -2,6 +2,7 @@
 /* eslint new-cap: "off" */
 
 import async from 'async';
+import {BucketInfo} from '../../models';
 import errors from '../../errors';
 import TTLVCodec from './codec/ttlv';
 import TlsTransport from './transport/tls';
@@ -358,16 +359,16 @@ export default class Client {
     /**
      * Create a new cryptographic key managed by the server,
      * for a specific bucket
-     * @param bucketName - The bucket name
+     * @param bucket - The bucket infos object
      * @param logger - Werelog logger object
      * @param cb - The callback(err: Error, bucketKeyId: String)
      */
-    createBucketKey(bucketName: string, logger: werelogs.Logger, cb: any) {
+    createBucketKey(bucket: BucketInfo, logger: werelogs.Logger, cb: any) {
         const attributes: any = [];
         if (!!this.options.bucketNameAttributeName) {
             attributes.push(KMIP.Attribute('TextString',
                 this.options.bucketNameAttributeName,
-                bucketName));
+                bucket.getName()));
         }
         attributes.push(...[
             KMIP.Attribute('Enumeration', 'Cryptographic Algorithm',
@@ -592,8 +593,16 @@ export default class Client {
     }
 
     healthcheck(logger, cb) {
-        // the bucket does not have to exist, just passing a common bucket name here
-        this.createBucketKey('kmip-healthcheck-test-bucket', logger, (err, bucketKeyId) => {
+        // Create a dummy bucketInfo
+        // The bucket doesn't have the exists, the metadata are only there to build a crypto key.
+        const bucketInfo = BucketInfo.fromObj({
+            _name: 'kmip-healthcheck-test-bucket',
+            _owner: '_internal_healthcheck',
+            _ownerDisplayName: '',
+            _creationDate: '2000-01-01T00:00:00.000Z'
+        });
+
+        this.createBucketKey(bucketInfo, logger, (err, bucketKeyId) => {
             if (err) {
                 logger.error('KMIP::healthcheck: failure to create a test bucket key', {
                     error: err,

@@ -3,6 +3,7 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const async = require('async');
+const BucketInfo = require('../../../../lib/models/BucketInfo').default;
 const TTLVCodec = require('../../../lib/network/kmip/codec/ttlv').default;
 const LoopbackServerChannel =
       require('../../utils/kmip/LoopbackServerChannel');
@@ -15,6 +16,8 @@ const KMIPClient = require('../../../lib/network/kmip/Client').default;
 const {
     logger,
 } = require('../../utils/kmip/ersatz');
+
+const bucketInfo = new BucketInfo('plop', 'OwnerId', 'OwnerDisplayName', new Date().toJSON());
 
 class LoopbackServerTransport extends TransportTemplate {
     constructor(options) {
@@ -48,7 +51,7 @@ describe('KMIP High Level Driver', () => {
                     LoopbackServerTransport);
                 const plaintext = Buffer.from(crypto.randomBytes(32));
                 async.waterfall([
-                    next => kmipClient.createBucketKey('plop', logger, next),
+                    next => kmipClient.createBucketKey(bucketInfo, logger, next),
                     (id, next) =>
                         kmipClient.cipherDataKey(1, id, plaintext,
                             logger, (err, ciphered) => {

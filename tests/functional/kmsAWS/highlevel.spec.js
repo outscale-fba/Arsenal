@@ -5,6 +5,7 @@ const { mockClient } = require('aws-sdk-client-mock');
 const { KMSClient, CreateKeyCommand, ScheduleKeyDeletionCommand, GenerateDataKeyCommand,
     EncryptCommand, DecryptCommand } = require('@aws-sdk/client-kms');
 
+const BucketInfo = require('../../../lib/models/BucketInfo').default;
 const KmsAWSClient = require('../../../lib/network/kmsAWS/Client').default;
 
 const logger = {
@@ -13,6 +14,8 @@ const logger = {
     warn: () => {},
     error: () => {},
 };
+
+const bucketInfo = new BucketInfo('plop', 'OwnerId', 'OwnerDisplayName', new Date().toJSON());
 
 describe('KMS AWS Client', () => {
     const options = {
@@ -71,7 +74,7 @@ describe('KMS AWS Client', () => {
             },
         });
 
-        kmsClient.createBucketKey('plop', logger, (err, bucketKeyId) => {
+        kmsClient.createBucketKey(bucketInfo, logger, (err, bucketKeyId) => {
             // Check the result
             expect(err).toBeNull();
             expect(bucketKeyId).toEqual('mocked-kms-key-id');
@@ -86,7 +89,7 @@ describe('KMS AWS Client', () => {
     it('should handle errors creating the key on bucket creation', done => {
         mockedAwsClient.on(CreateKeyCommand).rejects('Error');
 
-        kmsClient.createBucketKey('plop', logger, (err, bucketKeyId) => {
+        kmsClient.createBucketKey(bucketInfo, logger, (err, bucketKeyId) => {
             // Check the result
             expect(bucketKeyId).toBeUndefined();
             expect(err).toEqual(Error('InternalError'));
